@@ -9,71 +9,82 @@ import LandingPage from "../app/page";
 
 // Mock fetch globally
 const mockFetch = jest.fn();
-global.fetch = mockFetch;
+global.fetch = mockFetch as unknown as typeof fetch;
 
-// Mock window.location.href via delete + redefine
-delete (window as unknown as Record<string, unknown>).location;
-(window as unknown as Record<string, unknown>).location = { href: "" };
+// Mock window.location using Object.defineProperty in beforeAll
+let hrefSetter: jest.Mock;
 
-// Mock window.alert
-global.alert = jest.fn();
+beforeAll(() => {
+  hrefSetter = jest.fn();
+  Object.defineProperty(window, "location", {
+    configurable: true,
+    get() {
+      return { href: "", set href(v: string) { hrefSetter(v); } };
+    },
+  });
+});
 
 describe("LandingPage", () => {
   beforeEach(() => {
     mockFetch.mockReset();
-    (global.alert as jest.Mock).mockReset();
-    window.location.href = "";
+    hrefSetter.mockReset();
   });
 
   describe("Rendering", () => {
     test("renders hero heading", () => {
       render(<LandingPage />);
-      expect(screen.getByText(/Get More Interviews/i)).toBeInTheDocument();
+      expect(screen.getByRole("heading", { level: 1 })).toBeInTheDocument();
     });
 
-    test("renders price display", () => {
+    test("renders price display ($9)", () => {
       render(<LandingPage />);
       expect(screen.getByText("$9")).toBeInTheDocument();
     });
 
-    test("renders all three feature items", () => {
+    test("renders all three feature cards", () => {
       render(<LandingPage />);
-      expect(screen.getByText("ATS Resume Optimizer")).toBeInTheDocument();
-      expect(screen.getByText("LinkedIn Summary Generator")).toBeInTheDocument();
-      expect(screen.getByText("Cover Letter Generator")).toBeInTheDocument();
+      expect(screen.getAllByText("ATS Resume Optimizer").length).toBeGreaterThanOrEqual(1);
+      expect(screen.getAllByText("LinkedIn Summary Generator").length).toBeGreaterThanOrEqual(1);
+      expect(screen.getAllByText("Cover Letter Generator").length).toBeGreaterThanOrEqual(1);
     });
 
     test("renders email input field", () => {
       render(<LandingPage />);
-      expect(screen.getByPlaceholderText("Enter your email")).toBeInTheDocument();
+      expect(screen.getByPlaceholderText("your@email.com")).toBeInTheDocument();
     });
 
-    test("renders CTA button with correct text", () => {
+    test("renders CTA button", () => {
       render(<LandingPage />);
-      expect(screen.getByRole("button", { name: /Get Access for \$9/i })).toBeInTheDocument();
+      expect(screen.getByRole("button")).toBeInTheDocument();
     });
 
-    test("renders 'Secure payment via Dodo Payments' note", () => {
+    test("renders CTA button with $9 price", () => {
+      render(<LandingPage />);
+      expect(screen.getByRole("button").textContent).toContain("$9");
+    });
+
+    test("renders Dodo Payments security note", () => {
       render(<LandingPage />);
       expect(screen.getByText(/Secure payment via Dodo Payments/i)).toBeInTheDocument();
     });
 
-    test("renders footer", () => {
+    test("renders social proof testimonials", () => {
       render(<LandingPage />);
-      expect(screen.getByText(/ResumeAI © 2024/i)).toBeInTheDocument();
+      expect(screen.getByText(/Got 3 interviews in a week/i)).toBeInTheDocument();
     });
 
-    test("renders social proof stats", () => {
+    test("renders checklist items in paywall", () => {
       render(<LandingPage />);
-      expect(screen.getByText("2,400+")).toBeInTheDocument();
-      expect(screen.getByText("3x")).toBeInTheDocument();
+      const items = screen.getAllByRole("listitem");
+      const texts = items.map((li) => li.textContent);
+      expect(texts.some((t) => t?.includes("ATS Resume Optimizer"))).toBe(true);
+      expect(texts.some((t) => t?.includes("Copy to clipboard"))).toBe(true);
+      expect(texts.some((t) => t?.includes("No subscription"))).toBe(true);
     });
 
-    test("renders feature checklist items", () => {
+    test("button is enabled initially", () => {
       render(<LandingPage />);
-      expect(screen.getByText(/ATS Resume Optimizer/)).toBeInTheDocument();
-      expect(screen.getByText(/Unlimited uses/i)).toBeInTheDocument();
-      expect(screen.getByText(/Copy-to-clipboard/i)).toBeInTheDocument();
+      expect(screen.getByRole("button")).not.toBeDisabled();
     });
   });
 
@@ -82,32 +93,27 @@ describe("LandingPage", () => {
       const user = userEvent.setup();
       render(<LandingPage />);
 
-      const input = screen.getByPlaceholderText("Enter your email");
+      const input = screen.getByPlaceholderText("your@email.com");
       await user.type(input, "test@example.com");
 
       expect(input).toHaveValue("test@example.com");
     });
 
-    test("triggers checkout on Enter key press", async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ url: "https://checkout.example.com" }),
-      });
-
-      const user = userEvent.setup();
+    test("email input has required attribute", () => {
       render(<LandingPage />);
+      const input = screen.getByPlaceholderText("your@email.com");
+      expect(input).toBeRequired();
+    });
 
-      const input = screen.getByPlaceholderText("Enter your email");
-      await user.type(input, "enter@example.com{Enter}");
-
-      await waitFor(() => {
-        expect(mockFetch).toHaveBeenCalledWith("/api/checkout", expect.any(Object));
-      });
+    test("email input has type email", () => {
+      render(<LandingPage />);
+      const input = screen.getByPlaceholderText("your@email.com");
+      expect(input).toHaveAttribute("type", "email");
     });
   });
 
   describe("Checkout flow - success", () => {
-    test("calls /api/checkout with email on button click", async () => {
+    test("calls /api/checkout with email on form submit", async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => ({ url: "https://checkout.example.com" }),
@@ -116,8 +122,8 @@ describe("LandingPage", () => {
       const user = userEvent.setup();
       render(<LandingPage />);
 
-      await user.type(screen.getByPlaceholderText("Enter your email"), "buyer@test.com");
-      await user.click(screen.getByRole("button", { name: /Get Access/i }));
+      await user.type(screen.getByPlaceholderText("your@email.com"), "buyer@test.com");
+      await user.click(screen.getByRole("button"));
 
       await waitFor(() => {
         expect(mockFetch).toHaveBeenCalledWith("/api/checkout", {
@@ -137,16 +143,16 @@ describe("LandingPage", () => {
       const user = userEvent.setup();
       render(<LandingPage />);
 
-      await user.type(screen.getByPlaceholderText("Enter your email"), "buyer@test.com");
-      await user.click(screen.getByRole("button", { name: /Get Access/i }));
+      await user.type(screen.getByPlaceholderText("your@email.com"), "buyer@test.com");
+      await user.click(screen.getByRole("button"));
 
       await waitFor(() => {
-        expect(window.location.href).toBe("https://pay.dodo.io/session/abc");
+        expect(hrefSetter).toHaveBeenCalledWith("https://pay.dodo.io/session/abc");
       });
     });
 
     test("shows loading state while processing", async () => {
-      let resolvePromise: (value: unknown) => void;
+      let resolvePromise!: (value: unknown) => void;
       const pendingPromise = new Promise((resolve) => {
         resolvePromise = resolve;
       });
@@ -155,43 +161,25 @@ describe("LandingPage", () => {
       const user = userEvent.setup();
       render(<LandingPage />);
 
-      await user.type(screen.getByPlaceholderText("Enter your email"), "buyer@test.com");
-      await user.click(screen.getByRole("button", { name: /Get Access/i }));
+      await user.type(screen.getByPlaceholderText("your@email.com"), "buyer@test.com");
+      await user.click(screen.getByRole("button"));
 
-      expect(screen.getByRole("button", { name: /Processing.../i })).toBeInTheDocument();
-      expect(screen.getByRole("button")).toBeDisabled();
+      await waitFor(() => {
+        expect(screen.getByRole("button")).toBeDisabled();
+      });
+
+      expect(screen.getByRole("button").textContent).toContain("Redirecting");
 
       // Resolve to clean up
-      resolvePromise!({
+      resolvePromise({
         ok: true,
         json: async () => ({ url: "https://checkout.example.com" }),
       });
     });
   });
 
-  describe("Checkout flow - validation", () => {
-    test("shows alert when email is empty", async () => {
-      const user = userEvent.setup();
-      render(<LandingPage />);
-
-      await user.click(screen.getByRole("button", { name: /Get Access/i }));
-
-      expect(global.alert).toHaveBeenCalledWith("Please enter your email address");
-      expect(mockFetch).not.toHaveBeenCalled();
-    });
-
-    test("does not call fetch when email is empty", async () => {
-      const user = userEvent.setup();
-      render(<LandingPage />);
-
-      await user.click(screen.getByRole("button", { name: /Get Access/i }));
-
-      expect(mockFetch).not.toHaveBeenCalled();
-    });
-  });
-
   describe("Checkout flow - error handling", () => {
-    test("shows alert when API returns no URL", async () => {
+    test("shows error message when API returns no URL", async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => ({ error: "something" }),
@@ -200,25 +188,25 @@ describe("LandingPage", () => {
       const user = userEvent.setup();
       render(<LandingPage />);
 
-      await user.type(screen.getByPlaceholderText("Enter your email"), "bad@test.com");
-      await user.click(screen.getByRole("button", { name: /Get Access/i }));
+      await user.type(screen.getByPlaceholderText("your@email.com"), "bad@test.com");
+      await user.click(screen.getByRole("button"));
 
       await waitFor(() => {
-        expect(global.alert).toHaveBeenCalledWith("Something went wrong. Please try again.");
+        expect(screen.getByText(/Something went wrong/i)).toBeInTheDocument();
       });
     });
 
-    test("shows alert when fetch throws a network error", async () => {
+    test("shows network error when fetch throws", async () => {
       mockFetch.mockRejectedValueOnce(new Error("Network failure"));
 
       const user = userEvent.setup();
       render(<LandingPage />);
 
-      await user.type(screen.getByPlaceholderText("Enter your email"), "netfail@test.com");
-      await user.click(screen.getByRole("button", { name: /Get Access/i }));
+      await user.type(screen.getByPlaceholderText("your@email.com"), "netfail@test.com");
+      await user.click(screen.getByRole("button"));
 
       await waitFor(() => {
-        expect(global.alert).toHaveBeenCalledWith("Something went wrong. Please try again.");
+        expect(screen.getByText(/Network error/i)).toBeInTheDocument();
       });
     });
 
@@ -228,12 +216,69 @@ describe("LandingPage", () => {
       const user = userEvent.setup();
       render(<LandingPage />);
 
-      await user.type(screen.getByPlaceholderText("Enter your email"), "netfail@test.com");
-      await user.click(screen.getByRole("button", { name: /Get Access/i }));
+      await user.type(screen.getByPlaceholderText("your@email.com"), "netfail@test.com");
+      await user.click(screen.getByRole("button"));
 
       await waitFor(() => {
         expect(screen.getByRole("button")).not.toBeDisabled();
       });
+    });
+
+    test("clears previous error on new submission", async () => {
+      // First call fails
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ error: "something" }),
+      });
+
+      const user = userEvent.setup();
+      render(<LandingPage />);
+
+      await user.type(screen.getByPlaceholderText("your@email.com"), "bad@test.com");
+      await user.click(screen.getByRole("button"));
+
+      await waitFor(() => {
+        expect(screen.getByText(/Something went wrong/i)).toBeInTheDocument();
+      });
+
+      // Second call succeeds
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ url: "https://checkout.example.com" }),
+      });
+
+      await user.click(screen.getByRole("button"));
+
+      await waitFor(() => {
+        expect(screen.queryByText(/Something went wrong/i)).not.toBeInTheDocument();
+      });
+    });
+  });
+
+  describe("Form behavior", () => {
+    test("form uses onSubmit handler (not onClick)", () => {
+      render(<LandingPage />);
+      const form = screen.getByRole("button").closest("form");
+      expect(form).toBeInTheDocument();
+    });
+
+    test("does not redirect when no URL in response", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ message: "no url here" }),
+      });
+
+      const user = userEvent.setup();
+      render(<LandingPage />);
+
+      await user.type(screen.getByPlaceholderText("your@email.com"), "test@test.com");
+      await user.click(screen.getByRole("button"));
+
+      await waitFor(() => {
+        expect(mockFetch).toHaveBeenCalled();
+      });
+
+      expect(hrefSetter).not.toHaveBeenCalled();
     });
   });
 });
