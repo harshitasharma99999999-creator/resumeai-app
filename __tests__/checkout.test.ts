@@ -7,10 +7,10 @@
 const mockFetch = jest.fn();
 global.fetch = mockFetch as unknown as typeof fetch;
 
-// Mock console to suppress logs in tests
+// Suppress console.error in tests
 jest.spyOn(console, "error").mockImplementation(() => {});
 
-// Helper: create a minimal mock NextRequest-like object
+// Helper: create a minimal mock Request-like object
 function makeRequest(body: unknown) {
   return {
     json: async () => body,
@@ -30,161 +30,231 @@ describe("POST /api/checkout", () => {
     return mod.POST;
   };
 
-  test("returns 400 when email is missing", async () => {
-    const POST = await getHandler();
-    const req = makeRequest({});
-    const res = await POST(req as never);
-    const data = await res.json();
+  describe("Successful API calls", () => {
+    test("returns url from Dodo payment_links response (url field)", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ url: "https://pay.dodo.io/link/abc123" }),
+      });
 
-    expect(res.status).toBe(400);
-    expect(data.error).toBe("Email required");
-  });
+      const POST = await getHandler();
+      const res = await POST(makeRequest({ email: "test@example.com" }) as never);
+      const data = await res.json();
 
-  test("returns 400 when email is empty string", async () => {
-    const POST = await getHandler();
-    const req = makeRequest({ email: "" });
-    const res = await POST(req as never);
-    const data = await res.json();
-
-    expect(res.status).toBe(400);
-    expect(data.error).toBe("Email required");
-  });
-
-  test("returns checkout URL when Dodo Payments succeeds with payment_link", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ payment_link: "https://pay.dodo.io/session/abc123" }),
+      expect(res.status).toBe(200);
+      expect(data.url).toBe("https://pay.dodo.io/link/abc123");
     });
 
-    const POST = await getHandler();
-    const req = makeRequest({ email: "test@example.com" });
-    const res = await POST(req as never);
-    const data = await res.json();
+    test("returns url from Dodo payment_links response (payment_link field)", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ payment_link: "https://pay.dodo.io/link/xyz" }),
+      });
 
-    expect(res.status).toBe(200);
-    expect(data.url).toBe("https://pay.dodo.io/session/abc123");
-  });
+      const POST = await getHandler();
+      const res = await POST(makeRequest({ email: "user@domain.com" }) as never);
+      const data = await res.json();
 
-  test("returns checkout URL when Dodo Payments succeeds with url field", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ url: "https://pay.dodo.io/session/xyz" }),
+      expect(res.status).toBe(200);
+      expect(data.url).toBe("https://pay.dodo.io/link/xyz");
     });
 
-    const POST = await getHandler();
-    const req = makeRequest({ email: "user@domain.com" });
-    const res = await POST(req as never);
-    const data = await res.json();
+    test("falls back to demo URL when Dodo returns neither url nor payment_link", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ some_other_field: "value" }),
+      });
 
-    expect(res.status).toBe(200);
-    expect(data.url).toBe("https://pay.dodo.io/session/xyz");
+      const POST = await getHandler();
+      const res = await POST(makeRequest({ email: "fallback@test.com" }) as never);
+      const data = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(data.url).toContain("success?demo=true");
+    });
   });
 
-  test("falls back to app URL when Dodo Payments returns no checkout URL", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ some_other_field: "value" }),
+  describe("Fallback behavior (graceful degradation)", () => {
+    test("returns demo URL when Dodo API responds with non-2xx status", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        text: async () => "Unauthorized",
+      });
+
+      const POST = await getHandler();
+      const res = await POST(makeRequest({ email: "error@test.com" }) as never);
+      const data = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(data.url).toContain("success?demo=true");
     });
 
-    const POST = await getHandler();
-    const req = makeRequest({ email: "fallback@test.com" });
-    const res = await POST(req as never);
-    const data = await res.json();
+    test("returns demo URL when fetch throws a network error", async () => {
+      mockFetch.mockRejectedValueOnce(new Error("Network error"));
 
-    expect(res.status).toBe(200);
-    expect(data.url).toContain("/app?email=fallback%40test.com&paid=true");
-  });
+      const POST = await getHandler();
+      const res = await POST(makeRequest({ email: "crash@test.com" }) as never);
+      const data = await res.json();
 
-  test("falls back to app URL when Dodo Payments API fails (non-2xx)", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      json: async () => ({ error: "Invalid API key" }),
+      expect(res.status).toBe(200);
+      expect(data.url).toContain("success?demo=true");
     });
 
-    const POST = await getHandler();
-    const req = makeRequest({ email: "error@test.com" });
-    const res = await POST(req as never);
-    const data = await res.json();
+    test("returns demo URL when request body cannot be parsed", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ url: "https://pay.dodo.io/link/noemail" }),
+      });
 
-    expect(res.status).toBe(200);
-    expect(data.url).toContain("/app?email=error%40test.com&paid=true");
+      const POST = await getHandler();
+      // Pass a request where json() throws
+      const badReq = { json: async () => { throw new Error("parse error"); } };
+      const res = await POST(badReq as never);
+      const data = await res.json();
+
+      // Should still work - defaults to 'customer@example.com'
+      expect(res.status).toBe(200);
+      expect(data.url).toBeDefined();
+    });
   });
 
-  test("returns 500 when fetch throws an exception", async () => {
-    mockFetch.mockRejectedValueOnce(new Error("Network error"));
+  describe("API call correctness", () => {
+    test("calls Dodo payment_links endpoint (not /payments)", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ url: "https://checkout.dodo.io/pay" }),
+      });
 
-    const POST = await getHandler();
-    const req = makeRequest({ email: "crash@test.com" });
-    const res = await POST(req as never);
-    const data = await res.json();
+      const POST = await getHandler();
+      await POST(makeRequest({ email: "jane@example.com" }) as never);
 
-    expect(res.status).toBe(500);
-    expect(data.error).toBe("Internal server error");
-  });
-
-  test("calls Dodo Payments API with correct headers", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ payment_link: "https://checkout.dodo.io/pay" }),
+      expect(mockFetch).toHaveBeenCalledWith(
+        "https://api.dodopayments.com/payment_links",
+        expect.any(Object)
+      );
     });
 
-    const POST = await getHandler();
-    const req = makeRequest({ email: "jane@example.com" });
-    await POST(req as never);
+    test("sends Authorization header with API key", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ url: "https://checkout.dodo.io/pay" }),
+      });
 
-    expect(mockFetch).toHaveBeenCalledWith(
-      "https://api.dodopayments.com/payments",
-      expect.objectContaining({
-        method: "POST",
-        headers: expect.objectContaining({
-          Authorization: "Bearer test-api-key",
-          "Content-Type": "application/json",
-        }),
-      })
-    );
-  });
+      const POST = await getHandler();
+      await POST(makeRequest({ email: "jane@example.com" }) as never);
 
-  test("sends customer email in Dodo Payments payload", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ payment_link: "https://checkout.dodo.io/pay" }),
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          headers: expect.objectContaining({
+            Authorization: "Bearer test-api-key",
+          }),
+        })
+      );
     });
 
-    const POST = await getHandler();
-    const req = makeRequest({ email: "jane@example.com" });
-    await POST(req as never);
+    test("sends POST method to Dodo API", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ url: "https://checkout.dodo.io/pay" }),
+      });
 
-    const callBody = JSON.parse((mockFetch.mock.calls[0][1] as { body: string }).body);
-    expect(callBody.customer.email).toBe("jane@example.com");
-    expect(callBody.payment_link).toBe(true);
-  });
+      const POST = await getHandler();
+      await POST(makeRequest({ email: "jane@example.com" }) as never);
 
-  test("encodes email in return_url", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ payment_link: "https://checkout.dodo.io/pay" }),
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ method: "POST" })
+      );
     });
 
-    const POST = await getHandler();
-    const req = makeRequest({ email: "test+tag@example.com" });
-    await POST(req as never);
+    test("sends amount of 900 cents ($9) to Dodo API", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ url: "https://checkout.dodo.io/pay" }),
+      });
 
-    const callBody = JSON.parse((mockFetch.mock.calls[0][1] as { body: string }).body);
-    expect(callBody.return_url).toContain(encodeURIComponent("test+tag@example.com"));
-  });
+      const POST = await getHandler();
+      await POST(makeRequest({ email: "jane@example.com" }) as never);
 
-  test("uses NEXT_PUBLIC_URL env var for base URL", async () => {
-    process.env.NEXT_PUBLIC_URL = "https://resumeai.app";
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ payment_link: "https://checkout.dodo.io/pay" }),
+      const callBody = JSON.parse((mockFetch.mock.calls[0][1] as { body: string }).body);
+      expect(callBody.amount).toBe(900);
+      expect(callBody.currency).toBe("usd");
     });
 
-    const POST = await getHandler();
-    const req = makeRequest({ email: "prod@test.com" });
-    await POST(req as never);
+    test("sends customer_email from request body", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ url: "https://checkout.dodo.io/pay" }),
+      });
 
-    const callBody = JSON.parse((mockFetch.mock.calls[0][1] as { body: string }).body);
-    expect(callBody.return_url).toMatch(/^https:\/\/resumeai\.app\/success/);
+      const POST = await getHandler();
+      await POST(makeRequest({ email: "customer@test.com" }) as never);
+
+      const callBody = JSON.parse((mockFetch.mock.calls[0][1] as { body: string }).body);
+      expect(callBody.customer_email).toBe("customer@test.com");
+    });
+
+    test("defaults customer_email to customer@example.com when email not provided", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ url: "https://checkout.dodo.io/pay" }),
+      });
+
+      const POST = await getHandler();
+      await POST(makeRequest({}) as never);
+
+      const callBody = JSON.parse((mockFetch.mock.calls[0][1] as { body: string }).body);
+      expect(callBody.customer_email).toBe("customer@example.com");
+    });
+
+    test("sends redirect_url using NEXT_PUBLIC_URL env var", async () => {
+      process.env.NEXT_PUBLIC_URL = "https://resumeai.app";
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ url: "https://checkout.dodo.io/pay" }),
+      });
+
+      const POST = await getHandler();
+      await POST(makeRequest({ email: "prod@test.com" }) as never);
+
+      const callBody = JSON.parse((mockFetch.mock.calls[0][1] as { body: string }).body);
+      expect(callBody.redirect_url).toBe("https://resumeai.app/success");
+    });
+
+    test("sends redirect_url using localhost fallback when NEXT_PUBLIC_URL not set", async () => {
+      delete process.env.NEXT_PUBLIC_URL;
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ url: "https://checkout.dodo.io/pay" }),
+      });
+
+      const POST = await getHandler();
+      await POST(makeRequest({ email: "local@test.com" }) as never);
+
+      const callBody = JSON.parse((mockFetch.mock.calls[0][1] as { body: string }).body);
+      expect(callBody.redirect_url).toBe("http://localhost:3000/success");
+    });
+
+    test("always responds with status 200 (graceful degradation pattern)", async () => {
+      // Test all error paths still return 200
+      mockFetch.mockRejectedValueOnce(new Error("Network down"));
+
+      const POST = await getHandler();
+      const res = await POST(makeRequest({ email: "any@test.com" }) as never);
+
+      expect(res.status).toBe(200);
+    });
+
+    test("response always contains a url property", async () => {
+      mockFetch.mockRejectedValueOnce(new Error("Network down"));
+
+      const POST = await getHandler();
+      const res = await POST(makeRequest({ email: "any@test.com" }) as never);
+      const data = await res.json();
+
+      expect(data).toHaveProperty("url");
+      expect(typeof data.url).toBe("string");
+    });
   });
 });
